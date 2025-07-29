@@ -1,0 +1,29 @@
+<?php
+header('Content-Type: application/json');
+
+$latest_version = '1.2.0';
+$plugin_slug = 'onspire-custom-api';
+$plugin_zip_url = 'http://localhost:8888/wp-tests/wp-content/uploads/2025/06/onspire-custom-api.zip'; // URL where the zip is downloadable
+
+$plugin_info = array(
+    'slug'              => $plugin_slug,
+    'new_version'       => $latest_version,
+    'url'               => 'https://example.com/my-custom-api', // Plugin homepage/details page
+    'package'           => $plugin_zip_url,
+    'tested'            => '6.5.2', // WordPress version it's tested with
+    'requires'          => '5.0',   // Minimum WP version required
+    'requires_php'      => '7.4',   // Minimum PHP version required
+    'upgrade_notice'    => 'This update includes important security fixes and new features. Please back up before updating!',
+    // You can also add 'sections' for changelog, description, etc.
+    // 'sections' => array(
+    //     'description' => 'A detailed description of the plugin...',
+    //     'changelog'   => '<h4>1.2.0</h4><ul><li>Added new feature X</li><li>Fixed bug Y</li></ul><h4>1.1.0</h4>...',
+    // ),
+    // 'banners' => array(
+    //     'low'  => 'https://updates.yourdomain.com/banner-772x250.png',
+    //     'high' => 'https://updates.yourdomain.com/banner-1544x500.png',
+    // ),
+);
+
+echo json_encode($plugin_info);
+?>
