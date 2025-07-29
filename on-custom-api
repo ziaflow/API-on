@@ -1,0 +1,437 @@
+<?php
+/**
+ * Plugin Name: Onspire Custom API
+ * Plugin URI:  https://onspirehealthmarketing.com
+ * Description: Returns custom information via REST API.
+ * Version:     1.0.0
+ * Author:      Onspire
+ * Author URI:  https://osnpirehealthmarketing.com
+ * License:     GPL-2.0+
+ * License URI: http://www.gnu.org/licenses/gpl-2.0.txt
+ * Text Domain: onspire-custom-api
+ */
+
+if ( ! defined( 'ABSPATH' ) ) {
+    exit;
+}
+
+define( 'ONSPIRE_CUSTOM_API_SLUG', 'onspire-custom-api' );
+define( 'ONSPIRE_CUSTOM_API_FILE', __FILE__ ); // This helps construct the plugin base later
+
+class OnspireAPIPlugin {
+
+
+    private $secret_bearer_token = 'Nzc4.aeicieTv7EOtMYblTf-a1rQZPNz7oanoDtG_EEitiMau1GynKDd9YqXzAQ_A'; // <<-- CHANGE THIS TOKEN!
+
+    public function __construct() {
+        add_action( 'rest_api_init', array( $this, 'register_api_endpoints' ) ); // Changed to register_api_endpoints
+    }
+
+    public function register_api_endpoints() {
+        // Endpoint: /wp-mail-smtp Endpoint ---
+        register_rest_route(
+            'onspire-custom-api/v1',
+            '/wp-mail-smtp',
+            array(
+                'methods'             => WP_REST_Server::CREATABLE,
+                'callback'            => array( $this, 'handle_wp_mail_smtp_api_request' ),
+                'permission_callback' => array( $this, 'validate_bearer_token' ),
+                'args'                => array(
+                    'cmd' => array(
+                        'description'       => __( 'Command to execute (e.g., "get-errors").', 'onspire-custom-api' ),
+                        'type'              => 'string',
+                        'required'          => true,
+                        'sanitize_callback' => 'sanitize_text_field',
+                    ),
+                    'queryValue' => array(
+                        'description'       => __( 'Value to use in query (e.g., search term).', 'onspire-custom-api' ),
+                        'type'              => 'string',
+                        'required'          => false,
+                        'sanitize_callback' => 'sanitize_text_field',
+                    ),
+                    'limit' => array(
+                        'description'       => __( 'Limit for query results.', 'onspire-custom-api' ),
+                        'type'              => 'integer',
+                        'required'          => false,
+                        'default'           => 1,
+                        'sanitize_callback' => 'absint', // Ensure positive integer
+                    ),
+                ),
+            )
+        );
+
+        // Endpoint: /update-plugin ---
+        register_rest_route(
+            'onspire-custom-api/v1',
+            '/update-plugin',
+            array(
+                'methods'             => WP_REST_Server::CREATABLE, // Accepts POST requests
+                'callback'            => array( $this, 'handle_plugin_update_request' ),
+                'permission_callback' => array( $this, 'validate_bearer_token_for_update' ), // Separate or stricter permission
+                'args'                => array(
+                    'force_check' => array(
+                        'description'       => __( 'Force WordPress to check for updates now.', 'onspire-custom-api' ),
+                        'type'              => 'boolean',
+                        'required'          => false,
+                        'default'           => false,
+                        'sanitize_callback' => 'rest_sanitize_boolean',
+                    ),
+                    'do_update' => array(
+                        'description'       => __( 'Perform the update if available.', 'onspire-custom-api' ),
+                        'type'              => 'boolean',
+                        'required'          => false,
+                        'default'           => false,
+                        'sanitize_callback' => 'rest_sanitize_boolean',
+                    ),
+                    'plugin_slug' => array( // Optional: Specify which plugin to update, defaults to self
+                        'description'       => __( 'The slug of the plugin to update (folder name).', 'onspire-custom-api' ),
+                        'type'              => 'string',
+                        'required'          => false,
+                        'sanitize_callback' => 'sanitize_text_field',
+                    ),
+                ),
+            )
+        );
+    }
+
+    public function validate_bearer_token( WP_REST_Request $request ) {
+        $authorization_header = $request->get_header( 'authorization' );
+
+        if ( empty( $authorization_header ) ) {
+            return new WP_Error(
+                'rest_unauthorized',
+                __( 'Authorization header missing.', 'onspire-custom-api' ),
+                array( 'status' => 401 )
+            );
+        }
+
+        if ( ! preg_match( '/Bearer\s+(.*)/i', $authorization_header, $matches ) ) {
+            return new WP_Error(
+                'rest_unauthorized',
+                __( 'Invalid Authorization header format. Expected "Bearer <token>".', 'onspire-custom-api' ),
+                array( 'status' => 401 )
+            );
+        }
+
+        $provided_token = $matches[1];
+
+        if ( $provided_token === $this->secret_bearer_token ) {
+            return true;
+        } else {
+            return new WP_Error(
+                'rest_forbidden',
+                __( 'Invalid Bearer token.', 'onspire-custom-api' ),
+                array( 'status' => 403 )
+            );
+        }
+    }
+
+    public function validate_bearer_token_for_update( WP_REST_Request $request ) {
+
+        $token_valid = $this->validate_bearer_token( $request );
+        if ( is_wp_error( $token_valid ) ) {
+            return $token_valid;
+        }
+
+        //Ensure the user associated with this token (if using App Passwords)
+        if ( ! current_user_can( 'update_plugins' ) ) {
+            return new WP_Error(
+                'rest_forbidden_update_permission',
+                __( 'You do not have sufficient permissions to trigger plugin updates. Requires "update_plugins" capability.', 'onspire-custom-api' ),
+                array( 'status' => rest_authorization_required_code() )
+            );
+        }
+
+        return true;
+    }
+
+    public function handle_wp_mail_smtp_api_request( WP_REST_Request $request ) {
+        global $wpdb;
+
+        $command = $request->get_param( 'cmd' );
+        $queryValue = $request->get_param( 'queryValue' );
+        $limit = $request->get_param( 'limit' );
+
+        $query_to_execute = '';
+        $results = array();
+        $success = false;
+        $message = '';
+        $error = '';
+        $code = '';
+        $status_code = 200;
+
+        if ( $command === "get-errors" ) {
+
+            $search_term = '%' . $wpdb->esc_like( $queryValue ) . '%';
+
+            $query_to_execute = $wpdb->prepare(
+                "SELECT * FROM {$wpdb->prefix}wpmailsmtp_debug_events WHERE content LIKE %s ORDER BY id DESC LIMIT %d;",
+                $search_term,
+                $limit
+            );
+
+        } else {
+            $success = false;
+            $message = __( 'Invalid command.', 'onspire-custom-api' );
+            $code    = 'invalid_command';
+            $status_code = 400;
+        }
+
+        if(!empty($command)){
+            $results = $wpdb->get_results( $query_to_execute, ARRAY_A );
+
+            if ( $wpdb->last_error ) {
+                $success = false;
+                $message = __( 'Database query failed.', 'onspire-custom-api' );
+                $error   = $wpdb->last_error;
+                $code    = 'db_query_failed';
+                $status_code = 500;
+            } else {
+                $success = true;
+                $message = __( 'Query executed successfully.', 'onspire-custom-api' );
+            }
+        }
+
+        return new WP_REST_Response(
+            array(
+                'success' => $success,
+                'message' => $message,
+                'data'    => $results,
+                'count'   => count( $results ),
+                'error'   => $error,
+                'code'    => $code,
+            ),
+            $status_code
+        );
+    }
+
+    public function handle_plugin_update_request( WP_REST_Request $request ) {
+        require_once ABSPATH . 'wp-admin/includes/plugin.php';
+        require_once ABSPATH . 'wp-admin/includes/update.php';
+        require_once ABSPATH . 'wp-admin/includes/file.php';
+        require_once ABSPATH . 'wp-admin/includes/class-wp-upgrader.php';
+        require_once ABSPATH . 'wp-admin/includes/class-plugin-upgrader.php';
+
+        $force_check = $request->get_param( 'force_check' );
+        $do_update   = $request->get_param( 'do_update' );
+        $plugin_slug = $request->get_param( 'plugin_slug' );
+
+        if ( empty( $plugin_slug ) ) {
+            $plugin_file = plugin_basename( __FILE__ ); // 'onspire-custom-api/onspire-custom-api.php'
+            $plugin_slug = dirname( $plugin_file ); // 'onspire-custom-api'
+        } else {
+
+            $plugin_file = $plugin_slug . '/' . $plugin_slug . '.php';
+            if ( ! file_exists( WP_PLUGIN_DIR . '/' . $plugin_file ) ) {
+                return new WP_REST_Response(
+                    array(
+                        'success' => false,
+                        'message' => __( 'Specified plugin slug not found or invalid plugin file path.', 'onspire-custom-api' ),
+                        'code'    => 'invalid_plugin_slug',
+                    ),
+                    400
+                );
+            }
+        }
+
+
+        $response_data = array(
+            'success'   => false,
+            'message'   => __( 'Update process initiated.', 'onspire-custom-api' ),
+            'status'    => 'started',
+            'plugin_slug' => $plugin_slug,
+        );
+        $status_code = 200;
+
+        // Step 1: Force a refresh of the update transient
+        if ( $force_check ) {
+            delete_site_transient( 'update_plugins' );// Clear cached update
+            wp_update_plugins();// Trigger internal update check
+
+            $response_data['message'] = __( 'Forced update check triggered. Check plugins page for updates.', 'onspire-custom-api' );
+            $response_data['status'] = 'check_triggered';
+        }
+
+        // Step 2: Check if an update is available for this specific plugin
+        $update_plugins_transient = get_site_transient( 'update_plugins' );
+        $update_available = false;
+        $current_version = '';
+        $new_version = '';
+        $package_url = '';
+
+        $all_plugins = get_plugins();
+        if ( isset( $all_plugins[ $plugin_file ] ) ) {
+            $current_version = $all_plugins[ $plugin_file ]['Version'];
+        }
+
+        if ( ! empty( $update_plugins_transient->response[ $plugin_file ] ) ) {
+            $update_info = $update_plugins_transient->response[ $plugin_file ];
+            $new_version = $update_info->new_version;
+            $package_url = $update_info->package;
+
+            if ( version_compare( $current_version, $new_version, '<' ) ) {
+                $update_available = true;
+                $response_data['message'] .= ' ' . sprintf( __( 'Update available: %s (current: %s).', 'onspire-custom-api' ), $new_version, $current_version );
+                $response_data['update_details'] = array(
+                    'current_version' => $current_version,
+                    'new_version'     => $new_version,
+                    'package_url'     => $package_url,
+                );
+            } else {
+                $response_data['message'] .= ' ' . __( 'No update available or already up-to-date.', 'onspire-custom-api' );
+                $response_data['status'] = 'no_update';
+            }
+        } else {
+            $response_data['message'] .= ' ' . __( 'No update found in transient data (might need a forced check).', 'onspire-custom-api' );
+            $response_data['status'] = 'no_update_in_transient';
+
+            if ( ! $force_check ) {
+                $response_data['message'] .= ' ' . __( 'Consider setting "force_check" to true.', 'onspire-custom-api' );
+            }
+        }
+
+
+        // Step 3: Perform the update if requested and available
+        if ( $do_update && $update_available ) {
+
+            ob_start();// Silence output from the upgrader
+
+            // Perform the update
+            $upgrader = new Plugin_Upgrader( new Automatic_Upgrader_Skin() );
+            $update_result = $upgrader->upgrade( $plugin_file );
+
+            ob_end_clean(); // Clean the output buffer
+
+            if ( is_wp_error( $update_result ) ) {
+                $response_data['success'] = false;
+                $response_data['message'] = __( 'Plugin update failed.', 'onspire-custom-api' );
+                $response_data['error']   = $update_result->get_error_message();
+                $response_data['code']    = $update_result->get_error_code();
+                $status_code = 500;
+            } elseif ( false === $update_result ) {
+                $response_data['success'] = false;
+                $response_data['message'] = __( 'Plugin update failed due to unknown reasons (e.g., file permissions).', 'onspire-custom-api' );
+                $response_data['code']    = 'update_failed_unknown';
+                $status_code = 500;
+            } else {
+                $response_data['success'] = true;
+                $response_data['message'] = sprintf( __( 'Plugin %s updated successfully to version %s.', 'onspire-custom-api' ), $plugin_slug, $new_version );
+                $response_data['status']  = 'updated';
+            }
+        } elseif ( $do_update && ! $update_available ) {
+            $response_data['success'] = false;
+            $response_data['message'] = __( 'Update requested, but no update was available.', 'onspire-custom-api' );
+            $response_data['status']  = 'update_not_available';
+            $status_code = 409; // Conflict
+        }
+
+        return new WP_REST_Response( $response_data, $status_code );
+    }
+}
+
+function onspire_custom_api_check_update( $transient ) {
+    if ( empty( $transient->checked ) ) {
+        return $transient;
+    }
+
+    $request_args = array(
+        'timeout'   => 15,
+        'sslverify' => false, // Set to true for production with HTTPS!
+        'headers'   => array( 'Accept' => 'application/json' ),
+    );
+
+    $remote_url = 'https://auto.practis.com/plugin-info/onspire-custom-api'; // Prod
+//    $remote_url = 'http://localhost:8888/wp-tests/wp-content/plugins/onspire-custom-api/update-info.php';//Dev
+
+    $response = wp_remote_get( $remote_url, $request_args );
+
+    if ( is_wp_error( $response ) || wp_remote_retrieve_response_code( $response ) !== 200 ) {
+        error_log( 'Onspire Custom API: Error fetching remote update info: ' . ( is_wp_error( $response ) ? $response->get_error_message() : 'HTTP Code ' . wp_remote_retrieve_response_code( $response ) ) );
+        return $transient;
+    }
+
+    $remote_info = json_decode( wp_remote_retrieve_body( $response ) );
+
+    if ( ! $remote_info || ! isset( $remote_info->new_version ) ) {
+        error_log( 'Onspire Custom API: Invalid remote update info received.' );
+        return $transient;
+    }
+
+    $current_version = get_plugin_data( ONSPIRE_CUSTOM_API_FILE )['Version'];
+
+    if ( version_compare( $remote_info->new_version, $current_version, '>' ) ) {
+        $plugin_path = plugin_basename( ONSPIRE_CUSTOM_API_FILE ); // e.g., 'onspire-custom-api/onspire-custom-api.php'
+
+        $transient->response[ $plugin_path ] = (object) array(
+            'slug'              => $remote_info->slug,
+            'new_version'       => $remote_info->new_version,
+            'url'               => $remote_info->url,
+            'package'           => $remote_info->package,
+            'tested'            => $remote_info->tested,
+            'requires'          => $remote_info->requires,
+            'requires_php'      => $remote_info->requires_php,
+            'upgrade_notice'    => $remote_info->upgrade_notice,
+            // Add sections, banners etc. if you want them to display in the details modal
+            // 'sections'          => isset($remote_info->sections) ? $remote_info->sections : array(),
+            // 'banners'           => isset($remote_info->banners) ? $remote_info->banners : array(),
+        );
+
+        error_log( 'Onspire Custom API: Update found! New version: ' . $remote_info->new_version );
+    } else {
+        error_log( 'Onspire Custom API: No update available or current version is newer.' );
+    }
+
+    return $transient;
+}
+add_filter( 'pre_set_site_transient_update_plugins', 'onspire_custom_api_check_update' );
+
+/**
+ * Add plugin information to the WordPress plugins_api request.
+ */
+function onspire_custom_api_plugins_api( $result, $action, $args ) {
+    if ( 'plugin_information' !== $action || ! isset( $args->slug ) || $args->slug !== ONSPIRE_CUSTOM_API_SLUG ) {
+        return $result;
+    }
+
+    $request_args = array(
+        'timeout'   => 15,
+        'sslverify' => false, // Set to true for production with HTTPS!
+        'headers'   => array( 'Accept' => 'application/json' ),
+    );
+    $remote_url = 'https://auto.practis.com/plugin-info/onspire-custom-api'; // Prod
+//    $remote_url = 'http://localhost:8888/wp-tests/wp-content/plugins/onspire-custom-api/update-info.php';//Dev
+
+    $response = wp_remote_get( $remote_url, $request_args );
+
+    if ( ! is_wp_error( $response ) && wp_remote_retrieve_response_code( $response ) === 200 ) {
+        $remote_info = json_decode( wp_remote_retrieve_body( $response ) );
+        if ( $remote_info ) {
+            $result = (object) array(
+                'name'              => get_plugin_data( ONSPIRE_CUSTOM_API_FILE )['Name'], // Use plugin name from local header
+                'slug'              => $remote_info->slug,
+                'version'           => $remote_info->new_version, // Use the latest version
+                'author'            => get_plugin_data( ONSPIRE_CUSTOM_API_FILE )['Author'],
+                'author_profile'    => get_plugin_data( ONSPIRE_CUSTOM_API_FILE )['AuthorURI'],
+                'last_updated'      => gmdate( 'Y-m-d H:i:s', strtotime( 'now' ) ), // Or from your JSON
+                'homepage'          => $remote_info->url,
+                'requires'          => $remote_info->requires,
+                'tested'            => $remote_info->tested,
+                'requires_php'      => $remote_info->requires_php,
+                'download_link'     => $remote_info->package, // This is crucial for the update button
+                'trunk'             => $remote_info->package, // Alias for download_link
+                'banners'           => isset( $remote_info->banners ) ? $remote_info->banners : array(),
+                'sections'          => isset( $remote_info->sections ) ? $remote_info->sections : array(
+                    'description' => get_plugin_data( ONSPIRE_CUSTOM_API_FILE )['Description'], // Default description
+                    'changelog'   => isset( $remote_info->upgrade_notice ) ? '<h4>' . $remote_info->new_version . '</h4><p>' . $remote_info->upgrade_notice . '</p>' : '',
+                ),
+            );
+        }
+    }
+
+    return $result;
+}
+add_filter( 'plugins_api', 'onspire_custom_api_plugins_api', 10, 3 );
+
+// Instantiate the plugin class.
+new OnspireAPIPlugin();
+
